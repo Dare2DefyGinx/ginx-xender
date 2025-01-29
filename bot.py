@@ -86,12 +86,16 @@ async def body_html(update: Update, context: CallbackContext) -> int:
     return BODY_ATTACHMENT
 
 async def body_attachment(update: Update, context: CallbackContext) -> int:
-    if update.message.document:
-        file = await update.message.document.get_file()
-        await file.download_to_drive("attachment.pdf")
-        user_sessions[update.message.chat_id]["attachment"] = "attachment.pdf"
-    else:
+    if update.message.text and update.message.text.lower() == "skip":
         user_sessions[update.message.chat_id]["attachment"] = None
+    elif update.message.document:
+        file = await update.message.document.get_file()
+        file_name = f"attachment_{update.message.document.file_name}"
+        await file.download_to_drive(file_name)
+        user_sessions[update.message.chat_id]["attachment"] = file_name
+    else:
+        await update.message.reply_text("Invalid input. Please send a file or type 'skip'.")
+        return BODY_ATTACHMENT
 
     # Send Email
     try:
