@@ -2,8 +2,6 @@ import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler
 from dotenv import load_dotenv
@@ -32,7 +30,7 @@ SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 # Conversation States
-START, VALIDATE_SERIAL, FROM_NAME, FROM_EMAIL, REPLY_TO, SUBJECT, BODY_HTML, BODY_ATTACHMENT = range(8)
+START, VALIDATE_SERIAL, FROM_NAME, FROM_EMAIL, REPLY_TO, SUBJECT, BODY_HTML, SEND_TO = range(8)
 
 # User Session Data
 user_sessions = {}
@@ -82,44 +80,39 @@ async def subject(update: Update, context: CallbackContext) -> int:
 
 async def body_html(update: Update, context: CallbackContext) -> int:
     user_sessions[update.message.chat_id]["body_html"] = update.message.text
-    await update.message.reply_text("Almost done! Do you have any attachments? If yes, send the file. Otherwise, type 'skip'.")
-    return BODY_ATTACHMENT
+    await update.message.reply_text("Almost done! Please provide the recipient emails (comma-separated, 1-1000 emails).")
+    return SEND_TO
 
-async def body_attachment(update: Update, context: CallbackContext) -> int:
-    if update.message.text and update.message.text.lower() == "skip":
-        user_sessions[update.message.chat_id]["attachment"] = None
-    elif update.message.document:
-        file = await update.message.document.get_file()
-        file_name = f"attachment_{update.message.document.file_name}"
-        await file.download_to_drive(file_name)
-        user_sessions[update.message.chat_id]["attachment"] = file_name
-    else:
-        await update.message.reply_text("Invalid input. Please send a file or type 'skip'.")
-        return BODY_ATTACHMENT
+async def send_to(update: Update, context: CallbackContext) -> int:
+    user_input = update.message.text.strip()
+    if not user_input:
+        await update.message.reply_text("Recipient emails cannot be empty. Please provide the recipient emails (comma-separated, 1-1000 emails).")
+        return SEND_TO
+
+    emails = [email.strip() for email in user_input.split(",")]
+    if len(emails) < 1 or len(emails) > 1000:
+        await update.message.reply_text("Please provide between 1 and 1000 recipient emails.")
+        return SEND_TO
+
+    user_sessions[update.message.chat_id]["send_to"] = emails
 
     # Send Email
     try:
         session = user_sessions[update.message.chat_id]
-        msg = MIMEMultipart()
-        msg["From"] = f"{session['from_name']} <{session['from_email']}>"
-        msg["Reply-To"] = session["reply_to"]
-        msg["Subject"] = session["subject"]
-        msg.attach(MIMEText(session["body_html"], "html"))
+        for recipient in session["send_to"]:
+            msg = MIMEMultipart()
+            msg["From"] = f"{session['from_name']} <{session['from_email']}>"
+            msg["Reply-To"] = session["reply_to"]
+            msg["To"] = recipient
+            msg["Subject"] = session["subject"]
+            msg.attach(MIMEText(session["body_html"], "html"))
 
-        if session["attachment"]:
-            with open(session["attachment"], "rb") as attachment:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={session['attachment']}")
-            msg.attach(part)
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.sendmail(session["from_email"], recipient, msg.as_string())
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(session["from_email"], session["reply_to"], msg.as_string())
-
-        await update.message.reply_text("Email sent successfully!")
+        await update.message.reply_text(f"Email sent successfully to {len(emails)} recipients!")
     except Exception as e:
         logger.error(f"Error sending email: {e}")
         await update.message.reply_text(f"Error sending email: {e}")
@@ -150,7 +143,7 @@ def main() -> None:
             REPLY_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, reply_to)],
             SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, subject)],
             BODY_HTML: [MessageHandler(filters.TEXT & ~filters.COMMAND, body_html)],
-            BODY_ATTACHMENT: [MessageHandler(filters.TEXT | filters.Document.ALL, body_attachment)],
+            SEND_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_to)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
